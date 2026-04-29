@@ -1,5 +1,9 @@
 package com.chatbot.motosdelcaribe.respository;
 
-public interface ClientRepository extends JpaRepository<Client, int> {
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import com.chatbot.motosdelcaribe.model.Client;
+
+public interface ClientRepository extends JpaRepository<Client, Integer> {
 
 }
