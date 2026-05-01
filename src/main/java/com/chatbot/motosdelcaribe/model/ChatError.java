@@ -7,6 +7,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 
 import lombok.AllArgsConstructor;
@@ -28,7 +29,10 @@ import lombok.Setter;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
-@Table(name = "chat_error")
+@Table(
+    name = "chat_error",
+    indexes = @Index(name = "idx_chat_error_occurred_at", columnList = "occurred_at")
+)
 public class ChatError {
 
     @Id

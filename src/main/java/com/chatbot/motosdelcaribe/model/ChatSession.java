@@ -7,6 +7,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 
 import lombok.AllArgsConstructor;
@@ -28,7 +29,10 @@ import lombok.Setter;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
-@Table(name = "chat_session")
+@Table(
+    name = "chat_session",
+    indexes = @Index(name = "idx_chat_session_last_seen", columnList = "last_seen_at")
+)
 public class ChatSession {
 
     public enum Step {

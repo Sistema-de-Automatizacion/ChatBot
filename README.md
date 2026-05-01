@@ -129,9 +129,11 @@ public interface ClientRepository extends JpaRepository<Client, String> {
 
 ### ✅ Fase 2 — Memoria conversacional · `feat/chat-session` (mergeada)
 
-Tabla `chat_session(phone, step, contract_id, last_seen_at)` con migración explícita en `schema.sql` (idempotente vía `CREATE ... IF NOT EXISTS`), repository y un componente programado que cada 5 minutos borra sesiones inactivas hace más de 30 minutos.
+Tabla `chat_session(phone, step, contract_id, last_seen_at)` con repository y un componente programado que cada 5 minutos borra sesiones inactivas hace más de 30 minutos.
 
 Decisión: **MySQL en vez de Redis**. A esta escala (cientos de clientes, conversaciones de 1-3 min) sumar Redis es over-engineering; reusar la conexión existente simplifica la operación y los backups.
+
+> **Nota:** la creación física de la tabla la maneja Hibernate vía `spring.jpa.hibernate.ddl-auto=update` — ver sección 7 de Decisiones de diseño. Las entidades son la fuente de verdad del schema.
 
 ### ✅ Fase 3 — Lógica conversacional · `feat/conversation-service` (mergeada)
 
@@ -215,6 +217,25 @@ curl -X POST http://localhost:8081/api/conversation \
 
 Sin el header `X-API-Key` (o con valor incorrecto) la respuesta es `401`. Las rutas `/actuator/health` y `/swagger-ui.html` quedan abiertas para que la plataforma de hosting pueda probar liveness sin la key.
 
+### Correr con Docker
+
+El repo incluye un `Dockerfile` multi-stage (build con JDK 21, run con JRE 21 + usuario no-root). Imagen final ~200MB.
+
+```bash
+# Construir la imagen
+docker build -t motosdelcaribe-chatbot .
+
+# Correrla pasándole las credenciales como variables de entorno
+docker run -p 8081:8081 \
+  -e DB_URL="jdbc:mysql://HOST:3306/DB?useSSL=true&serverTimezone=UTC" \
+  -e DB_USERNAME=usuario \
+  -e DB_PASSWORD=clave \
+  -e APP_API_KEY="local-dev-key-1234" \
+  motosdelcaribe-chatbot
+```
+
+Esto es lo que la mayoría de plataformas modernas (Render con `runtime: docker`, Azure App Service en modo Container, Fly.io) van a usar para desplegar. Para Render con `runtime: java` o Azure Web App nativo de Java, NO hace falta Docker — esas plataformas detectan Maven y compilan el `.jar` por su cuenta.
+
 ### Variables de entorno
 
 | Variable | Para qué |
@@ -233,6 +254,8 @@ Sin el header `X-API-Key` (o con valor incorrecto) la respuesta es `401`. Las ru
 
 ```
 ChatBot/
+├── Dockerfile                                    # Multi-stage build (JDK→JRE), usuario non-root
+├── .dockerignore
 ├── pom.xml
 ├── mvnw, mvnw.cmd                                # Maven wrapper
 ├── .env.example                                  # Plantilla — copiar a .env
@@ -240,16 +263,20 @@ ChatBot/
 │   ├── java/com/chatbot/motosdelcaribe/
 │   │   ├── MotosdelcaribeApplication.java        # Main + @EnableScheduling
 │   │   ├── controller/
-│   │   │   └── ConversationController.java       # POST /api/conversation
+│   │   │   ├── ConversationController.java      # POST /api/conversation
+│   │   │   └── ErrorController.java             # POST /api/errors
 │   │   ├── dto/
 │   │   │   ├── IncomingMessage.java              # { from, text } + validación
-│   │   │   └── OutgoingMessage.java              # { to, text }
+│   │   │   ├── OutgoingMessage.java              # { to, text }
+│   │   │   └── ErrorReport.java                  # { phone?, context, errorMessage }
 │   │   ├── model/
 │   │   │   ├── Client.java                       # @Subselect sobre vw_sv_all_motos_semanal
-│   │   │   └── ChatSession.java                  # Estado conversacional + enum Step
+│   │   │   ├── ChatSession.java                  # Estado conversacional + enum Step
+│   │   │   └── ChatError.java                    # Log append-only de fallas async
 │   │   ├── respository/                          # (sí, con typo, así está en master por ahora)
 │   │   │   ├── ClientRepository.java
-│   │   │   └── ChatSessionRepository.java
+│   │   │   ├── ChatSessionRepository.java
+│   │   │   └── ChatErrorRepository.java
 │   │   ├── security/
 │   │   │   └── ApiKeyFilter.java                 # OncePerRequestFilter, gate /api/**
 │   │   ├── service/
@@ -258,11 +285,12 @@ ChatBot/
 │   │   └── util/
 │   │       └── PhoneNormalizer.java              # Últimos 10 dígitos
 │   └── resources/
-│       ├── application.properties
-│       └── schema.sql                            # CREATE TABLE IF NOT EXISTS chat_session
+│       └── application.properties
 └── src/test/java/com/chatbot/motosdelcaribe/
     ├── MotosdelcaribeApplicationTests.java       # Carga del contexto Spring
-    ├── controller/ConversationControllerTest.java
+    ├── controller/
+    │   ├── ConversationControllerTest.java
+    │   └── ErrorControllerTest.java
     ├── security/ApiKeyFilterTest.java
     ├── service/
     │   ├── ChatSessionCleanupTest.java
@@ -281,7 +309,7 @@ ChatBot/
 | **`@Subselect` con dedup**, no `@Table` simple | Composite key con `@IdClass` | Imposible de olvidar el dedup; ya pasó en el Backend de cartera que un JOIN sin dedup infló datos 8x |
 | **Sin pedir cédula** en el flow | Pedir cédula como en el drawio inicial | La vista no tiene esa columna; el teléfono ya identifica al cliente, mejor UX en WhatsApp |
 | **Match por últimos 10 dígitos del teléfono** | Reformatear TELULT a E.164 | Meta entrega `573041234567`, TELULT guarda `3041234567` — comparar últimos 10 es robusto y portable |
-| **`schema.sql` con `IF NOT EXISTS`** | Flyway/Liquibase desde día 1 | Una sola tabla; sumar Flyway agrega ceremonia. Migrar después es trivial |
+| **`spring.jpa.hibernate.ddl-auto=update`** (entidades = source of truth del schema) | `schema.sql` explícito o Flyway desde día 1 | Solo 2 tablas propias y deploy a entornos limpios. `update` crea tablas/columnas/índices faltantes y nunca dropea nada. Si más adelante hace falta cambiar tipos o droppear cosas, se introduce Flyway en una migración explícita. |
 | **Stack idéntico al Backend de cartera** | Otro lenguaje (Node, Python) | Una persona puede saltar entre repos sin reaprender; reusa convenciones |
 
 ---
