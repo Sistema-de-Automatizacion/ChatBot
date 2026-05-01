@@ -2,7 +2,7 @@
 
 Servicio Spring Boot que va a contestar **automáticamente** los mensajes de WhatsApp de los clientes de Motos del Caribe Renting S.A.S. cuando pregunten cosas como _"¿cuánto debo?"_, _"¿cuándo es mi próxima cuota?"_ o _"¿tengo mora?"_. Hoy esas consultas las atiende una persona; con el bot el cliente recibe respuesta al instante, las 24 horas.
 
-> **Estado:** en construcción. La aprobación del Business Manager de Meta para WhatsApp Business todavía está pendiente; mientras tanto se construye y prueba la lógica contra la BD.
+> **Estado:** lógica completa, pendiente de la aprobación del Business Manager de Meta para WhatsApp Business y de la conexión final con n8n. El bot ya se puede ejercitar end-to-end vía Postman/curl simulando a n8n (ver sección 5).
 
 ---
 
@@ -133,27 +133,54 @@ Tabla `chat_session(phone, step, contract_id, last_seen_at)` con migración expl
 
 Decisión: **MySQL en vez de Redis**. A esta escala (cientos de clientes, conversaciones de 1-3 min) sumar Redis es over-engineering; reusar la conexión existente simplifica la operación y los backups.
 
-### ⏳ Fase 3 — Lógica conversacional (próxima)
+### ✅ Fase 3 — Lógica conversacional · `feat/conversation-service` (mergeada)
 
-Implementar `ConversationService` como una función pura `(phone, mensaje) → (respuesta, próximoEstado)` que aplique las reglas del flow:
+`ConversationService` resuelve `(phone, texto) → (respuesta, próximo estado)` aplicando estas transiciones:
 
 ```
-IDLE             + "Hola"        →  "Bienvenido X, dime tu placa"     →  AWAITING_PLATE
-AWAITING_PLATE   + "ABC123"      →  "Hola X. Elige: 1.Saldo 2.Cuota 3.Mora"  →  AWAITING_OPTION
-AWAITING_OPTION  + "1"           →  "Tu saldo pendiente es $..."      →  IDLE (sesión borrada)
+IDLE             + cualquier texto  →  TELULT no matchea: "No tienes acceso..."  →  sigue IDLE
+                                       TELULT matchea:    "Hola X, dime tu placa"  →  AWAITING_PLATE
+AWAITING_PLATE   + placa correcta   →  menú 1/2/3 con contractId guardado          →  AWAITING_OPTION
+                 + placa incorrecta →  "Esa placa no coincide..."                  →  sigue AWAITING_PLATE
+AWAITING_OPTION  + "1"              →  "Tu saldo pendiente es $X."                 →  IDLE (sesión borrada)
+                 + "2"              →  "Tu próxima cuota es $X el día Y."          →  IDLE
+                 + "3"              →  "Tienes una mora de $X." (o "estás al día") →  IDLE
+                 + otro             →  "Opción inválida..."                        →  sigue AWAITING_OPTION
 ```
 
-### ⏳ Fase 4 — Endpoint para n8n
+Reglas de oro:
+- **El bot nunca calcula plata**: los importes salen tal cual de la fila de `Client`. Si más adelante se agrega NLU (ver sección 8 de Próximas extensiones), el LLM solo clasifica intención.
+- **Match por últimos 10 dígitos** del teléfono entrante (helper `util/PhoneNormalizer`): Meta entrega `573041234567`, `TELULT` guarda `3041234567`.
+- **Sin pedir cédula**: la vista no la tiene; el teléfono ya identifica al cliente.
 
-`POST /api/conversation` que recibe `{ from, text }` y devuelve `{ to, text }`. n8n se ocupa del verifyToken / firma de Meta; el ChatBot solo procesa.
+### ✅ Fase 4 — Endpoint para n8n · `feat/n8n-controller` (mergeada)
 
-### ⏳ Fase 5 — Tests
+`POST /api/conversation` recibe `{ from, text }` y devuelve `{ to, text }`. n8n hace el verifyToken / firma `X-Hub-Signature-256` de Meta; el bot solo procesa.
 
-Unit tests del `ConversationService` (lógica pura, fácil de testear) + tests de integración del controller con `@SpringBootTest` y MockMvc.
+**Auth simple por header compartido** (`security/ApiKeyFilter`): cada request a `/api/**` debe traer `X-API-Key` con el mismo valor que la propiedad `app.api-key`. `/actuator/health` y Swagger quedan abiertos para que las plataformas (Render/Azure) puedan probar liveness sin la key. No se usa Spring Security porque solo hace falta validar un header — sumarlo agregaría 2 jars y un layer extra.
+
+Validación del request via Jakarta Validation:
+- `from`: requerido, 10-15 dígitos (E.164 sin `+`).
+- `text`: requerido, máximo 500 chars.
+
+### ✅ Fase 5 — Tests · `feat/cleanup-test-and-docs` (este PR)
+
+Cobertura final con **mocks** (sin tocar la BD para que el suite corra rápido en CI):
+
+| Suite | Casos | Qué cubre |
+|---|---|---|
+| `PhoneNormalizerTest` | 6 | null, basura sin dígitos, E.164 con `+57`, separadores, ya normalizado, sub-10 dígitos |
+| `ConversationServiceTest` | 10 | toda la matriz de transiciones del state machine |
+| `ChatSessionCleanupTest` | 3 | threshold respeta el TTL, llamadas sucesivas usan thresholds actualizados, sin borrables no llama otros métodos |
+| `ApiKeyFilterTest` | 6 | rutas públicas pasan, `/api/*` rechaza missing/invalid, header válido pasa |
+| `ConversationControllerTest` | 6 | happy path, missing/invalid api key (401), JSON malformado, validación de campos |
+| `MotosdelcaribeApplicationTests` | 1 | el contexto de Spring Boot carga correctamente |
+
+**Total: 32 unit tests verdes.** Las suites con `@WebMvcTest` o `@SpringBootTest` levantan solo el slice necesario (sin scheduler real, sin tráfico HTTP).
 
 ### ⏳ Aprobación de Meta
 
-Independiente del código: el equipo está esperando aprobación del Business Manager de WhatsApp. Mientras tanto, el bot se puede probar end-to-end con mocks o con un postman simulando a n8n.
+Independiente del código: el equipo está esperando aprobación del Business Manager de WhatsApp. Mientras tanto, el bot se puede probar end-to-end con un Postman simulando a n8n (ver sección 5).
 
 ---
 
@@ -176,6 +203,18 @@ curl http://localhost:8081/actuator/health
 # {"status":"UP"}
 ```
 
+### Probar el endpoint de conversación (simulando a n8n)
+
+```bash
+curl -X POST http://localhost:8081/api/conversation \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: local-dev-key-1234" \
+  -d '{"from":"573014888226","text":"Hola"}'
+# {"to":"573014888226","text":"Hola Sebastian, soy el asistente de Motos del Caribe..."}
+```
+
+Sin el header `X-API-Key` (o con valor incorrecto) la respuesta es `401`. Las rutas `/actuator/health` y `/swagger-ui.html` quedan abiertas para que la plataforma de hosting pueda probar liveness sin la key.
+
 ### Variables de entorno
 
 | Variable | Para qué |
@@ -183,6 +222,7 @@ curl http://localhost:8081/actuator/health
 | `DB_URL` | JDBC URL de MySQL (incluye `?useSSL=true&...`) |
 | `DB_USERNAME` | Usuario de la BD |
 | `DB_PASSWORD` | Contraseña de la BD |
+| `APP_API_KEY` | Token compartido con n8n para `/api/**` (`X-API-Key`). Default local: `local-dev-key-1234`. En producción debe ser un string random ≥ 32 chars. |
 | `PORT` | _(opcional)_ Puerto HTTP. Default `8081` en dev. Render/Azure lo setean automáticamente. |
 
 `.env` está en el `.gitignore` — nunca subas credenciales al repo.
@@ -194,23 +234,40 @@ curl http://localhost:8081/actuator/health
 ```
 ChatBot/
 ├── pom.xml
-├── mvnw, mvnw.cmd          # Maven wrapper
-├── .env.example            # Plantilla — copiar a .env
+├── mvnw, mvnw.cmd                                # Maven wrapper
+├── .env.example                                  # Plantilla — copiar a .env
 ├── src/main/
 │   ├── java/com/chatbot/motosdelcaribe/
-│   │   ├── MotosdelcaribeApplication.java   # Main + @EnableScheduling
+│   │   ├── MotosdelcaribeApplication.java        # Main + @EnableScheduling
+│   │   ├── controller/
+│   │   │   └── ConversationController.java       # POST /api/conversation
+│   │   ├── dto/
+│   │   │   ├── IncomingMessage.java              # { from, text } + validación
+│   │   │   └── OutgoingMessage.java              # { to, text }
 │   │   ├── model/
-│   │   │   ├── Client.java                  # @Subselect sobre vw_sv_all_motos_semanal
-│   │   │   └── ChatSession.java             # Estado conversacional
-│   │   ├── respository/                     # (sí, con typo, así está en master por ahora)
+│   │   │   ├── Client.java                       # @Subselect sobre vw_sv_all_motos_semanal
+│   │   │   └── ChatSession.java                  # Estado conversacional + enum Step
+│   │   ├── respository/                          # (sí, con typo, así está en master por ahora)
 │   │   │   ├── ClientRepository.java
 │   │   │   └── ChatSessionRepository.java
-│   │   └── service/
-│   │       └── ChatSessionCleanup.java      # @Scheduled cada 5 min, TTL 30 min
+│   │   ├── security/
+│   │   │   └── ApiKeyFilter.java                 # OncePerRequestFilter, gate /api/**
+│   │   ├── service/
+│   │   │   ├── ChatSessionCleanup.java           # @Scheduled cada 5 min, TTL 30 min
+│   │   │   └── ConversationService.java          # Máquina de estados del bot
+│   │   └── util/
+│   │       └── PhoneNormalizer.java              # Últimos 10 dígitos
 │   └── resources/
 │       ├── application.properties
-│       └── schema.sql                       # CREATE TABLE IF NOT EXISTS chat_session
-└── src/test/java/...                        # Suite vacía por ahora (Fase 5)
+│       └── schema.sql                            # CREATE TABLE IF NOT EXISTS chat_session
+└── src/test/java/com/chatbot/motosdelcaribe/
+    ├── MotosdelcaribeApplicationTests.java       # Carga del contexto Spring
+    ├── controller/ConversationControllerTest.java
+    ├── security/ApiKeyFilterTest.java
+    ├── service/
+    │   ├── ChatSessionCleanupTest.java
+    │   └── ConversationServiceTest.java
+    └── util/PhoneNormalizerTest.java
 ```
 
 ---
@@ -229,12 +286,27 @@ ChatBot/
 
 ---
 
-## 8. Cómo contribuir
+## 8. Próximas extensiones (no en el scope actual)
 
-Convención de ramas: `feat/...`, `fix/...`, `docs/...`. Pull requests contra `master`. Verificar siempre `./mvnw clean compile` antes de pushear.
+Ideas que tienen sentido sumar después de v1, pero que no son parte del flow MVP:
+
+- **NLU local con Ollama** para que el cliente pueda escribir _"necesito saber mi deuda"_ en vez de mandar `1`. Un modelo pequeño (Phi-3 mini, Llama 3.1 8B Q4) clasificaría el texto libre en una de las 3 intenciones del menú; el endpoint de respuesta seguiría siendo el mismo. Costo $0 por mensaje y soberanía de datos vs. requerir una VM con RAM/GPU. Regla que NO se rompe: el LLM jamás genera o calcula montos; solo clasifica intención.
+- **Comandos de control** tipo `/menu`, `/cancelar`, `/reiniciar` para que el cliente pueda salir de un paso atascado sin esperar el TTL.
+- **Múltiples contratos por teléfono**: si un cliente tiene varias motos, listarlas y dejarlo elegir antes de pedir la placa específica.
+- **Migrar de `schema.sql` a Flyway** cuando haya 3+ tablas propias.
+
+## 9. Cómo contribuir
+
+Convención de ramas: `feat/...`, `fix/...`, `docs/...`. Pull requests contra `master`. Antes de pushear:
+
+```bash
+./mvnw clean test
+```
+
+Toda PR debe llegar con la suite verde.
 
 ---
 
-## 9. Contacto
+## 10. Contacto
 
 Issues y discusiones en https://github.com/Sistema-de-Automatizacion/ChatBot/issues.
