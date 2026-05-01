@@ -1,0 +1,31 @@
+# Builds y caches que solo viven en la maquina del dev
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# Secrets locales — NUNCA copiar al build context
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+.classpath
+.project
+.settings/
+*.iml
+*.iws
+*.ipr
+
+# Git
+.git/
+.gitattributes
+.gitignore
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Markdown / docs no van a la imagen final
+README.md
+HELP.md
