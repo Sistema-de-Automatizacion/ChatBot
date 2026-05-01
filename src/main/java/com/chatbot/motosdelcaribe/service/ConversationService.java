@@ -40,6 +40,25 @@ public class ConversationService {
 
     private static final NumberFormat MONEY = currencyFormatter();
 
+    /**
+     * La BD guarda los importes "sin fraccion de mil" (saldo, cuota, deuda):
+     * el valor 540 representa $540.000 COP. Multiplicamos por este factor antes
+     * de formatear para que el cliente vea el monto real.
+     */
+    private static final double STORAGE_TO_PESOS = 1_000d;
+
+    /**
+     * Menu mostrado tras confirmar la placa y tras una opcion invalida. Se
+     * incluye una breve descripcion de cada opcion para que el cliente sepa
+     * que va a recibir antes de elegir.
+     */
+    private static final String MENU =
+        "Que deseas consultar?\n"
+            + "1. Saldo pendiente — total que aun debes por la moto.\n"
+            + "2. Proxima cuota — monto de tu siguiente pago semanal y dia en que vence.\n"
+            + "3. Mora — si tienes cuotas atrasadas por pagar.\n\n"
+            + "Por favor responde con el numero de la opcion (1, 2 o 3).";
+
     private final ClientRepository clientRepo;
     private final ChatSessionRepository sessionRepo;
 
@@ -95,10 +114,7 @@ public class ConversationService {
         session.setContractId(match.get().getContrato());
         session.setStep(Step.AWAITING_OPTION);
         sessionRepo.save(session);
-        return new Reply("Perfecto. Que deseas consultar?\n"
-            + "1. Saldo pendiente\n"
-            + "2. Proxima cuota\n"
-            + "3. Mora");
+        return new Reply("Perfecto. " + MENU);
     }
 
     private Reply handleOption(ChatSession session, String text) {
@@ -106,7 +122,7 @@ public class ConversationService {
         if (!choice.equals("1") && !choice.equals("2") && !choice.equals("3")) {
             session.setLastSeenAt(Instant.now());
             sessionRepo.save(session);
-            return new Reply("Opcion invalida. Por favor responde 1, 2 o 3.");
+            return new Reply("Opcion invalida. " + MENU);
         }
 
         Client client = clientRepo.findById(session.getContractId())
@@ -115,9 +131,9 @@ public class ConversationService {
 
         Reply reply = switch (choice) {
             case "1" -> new Reply("Tu saldo pendiente por pagar es de "
-                + MONEY.format(client.getBalance()) + ".");
+                + formatMoney(client.getBalance()) + ".");
             case "2" -> new Reply("Tu proxima cuota es de "
-                + MONEY.format(client.getPayment())
+                + formatMoney(client.getPayment())
                 + " y vence el dia " + safeDay(client.getPaymentDay()) + ".");
             case "3" -> new Reply(formatMoraMessage(client));
             default  -> throw new IllegalStateException("unreachable");
@@ -135,8 +151,16 @@ public class ConversationService {
         if (mora <= 0) {
             return "No tienes mora pendiente. Estas al dia con tu contrato.";
         }
-        return "Tienes una mora pendiente de " + MONEY.format(mora)
+        return "Tienes una mora pendiente de " + formatMoney(mora)
             + ". Por favor ponte al dia para evitar intereses adicionales.";
+    }
+
+    /**
+     * Formatea un valor de la BD a moneda colombiana, aplicando el factor
+     * de escala (la BD guarda 540 cuando el monto real son $540.000).
+     */
+    private static String formatMoney(double rawFromDb) {
+        return MONEY.format(rawFromDb * STORAGE_TO_PESOS);
     }
 
     private static String firstName(String fullName) {

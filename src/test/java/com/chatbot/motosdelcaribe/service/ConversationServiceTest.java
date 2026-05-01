@@ -104,10 +104,12 @@ class ConversationServiceTest {
 
         Reply reply = service.handle(FROM_E164, "  xyj56p  ");
 
+        // El menu debe mostrar las 3 opciones con descripcion (no solo el numero).
         assertThat(reply.text())
-            .contains("Saldo pendiente")
-            .contains("Proxima cuota")
-            .contains("Mora");
+            .contains("1. Saldo pendiente")
+            .contains("2. Proxima cuota")
+            .contains("3. Mora")
+            .contains("siguiente pago"); // descripcion de la opcion 2
         assertThat(session.getStep()).isEqualTo(Step.AWAITING_OPTION);
         assertThat(session.getContractId()).isEqualTo("001");
         verify(sessionRepo).save(session);
@@ -130,7 +132,8 @@ class ConversationServiceTest {
     // ---- AWAITING_OPTION ----
 
     @Test
-    void opcion1RetornaSaldoYBorraLaSesion() {
+    void opcion1RetornaSaldoMultiplicadoPor1000YBorraLaSesion() {
+        // sampleClient.balance = 540 en BD -> debe mostrarse como $540.000.
         ChatSession session = new ChatSession(PHONE, Step.AWAITING_OPTION, "001", hace(30));
         when(sessionRepo.findById(PHONE)).thenReturn(Optional.of(session));
         when(clientRepo.findById("001")).thenReturn(Optional.of(sampleClient));
@@ -139,13 +142,15 @@ class ConversationServiceTest {
 
         assertThat(reply.text())
             .contains("saldo pendiente")
-            .contains("540"); // formato es-CO: "$ 540"
+            .contains("540.000");           // x1000 + separador es-CO
+        assertThat(reply.text()).doesNotContain("$ 540 ");  // no debe quedar sin escalar
         verify(sessionRepo).deleteById(PHONE);
         verify(sessionRepo, never()).save(any());
     }
 
     @Test
     void opcion2RetornaProximaCuotaConDiaYBorraSesion() {
+        // sampleClient.payment = 100 en BD -> debe mostrarse como $100.000.
         ChatSession session = new ChatSession(PHONE, Step.AWAITING_OPTION, "001", hace(30));
         when(sessionRepo.findById(PHONE)).thenReturn(Optional.of(session));
         when(clientRepo.findById("001")).thenReturn(Optional.of(sampleClient));
@@ -154,7 +159,7 @@ class ConversationServiceTest {
 
         assertThat(reply.text())
             .contains("proxima cuota")
-            .contains("100")
+            .contains("100.000")            // x1000 + separador es-CO
             .contains("Mier");
         verify(sessionRepo).deleteById(PHONE);
     }
@@ -175,8 +180,9 @@ class ConversationServiceTest {
     }
 
     @Test
-    void opcion3ConMoraRetornaMontoYBorraSesion() {
-        sampleClient.setAcummulatedDebet(75_000.0);
+    void opcion3ConMoraRetornaMontoMultiplicadoPor1000YBorraSesion() {
+        // BD guarda 75 (= $75.000); con el factor x1000 debe mostrarse "$ 75.000".
+        sampleClient.setAcummulatedDebet(75.0);
         ChatSession session = new ChatSession(PHONE, Step.AWAITING_OPTION, "001", hace(30));
         when(sessionRepo.findById(PHONE)).thenReturn(Optional.of(session));
         when(clientRepo.findById("001")).thenReturn(Optional.of(sampleClient));
@@ -185,18 +191,24 @@ class ConversationServiceTest {
 
         assertThat(reply.text())
             .contains("mora pendiente")
-            .contains("75.000");
+            .contains("75.000");            // x1000 + separador es-CO
         verify(sessionRepo).deleteById(PHONE);
     }
 
     @Test
-    void opcionInvalidaPideOtraVezSinTocarLaBDDeContratos() {
+    void opcionInvalidaReexplicaElMenuConDescripciones() {
         ChatSession session = new ChatSession(PHONE, Step.AWAITING_OPTION, "001", hace(30));
         when(sessionRepo.findById(PHONE)).thenReturn(Optional.of(session));
 
         Reply reply = service.handle(FROM_E164, "saldo");
 
-        assertThat(reply.text()).contains("Opcion invalida");
+        // El mensaje de error debe indicar que la opcion no es valida Y volver a
+        // mostrar el menu con descripcion (no solo decir "1, 2 o 3" a secas).
+        assertThat(reply.text())
+            .contains("Opcion invalida")
+            .contains("1. Saldo pendiente")
+            .contains("2. Proxima cuota")
+            .contains("3. Mora");
         assertThat(session.getStep()).isEqualTo(Step.AWAITING_OPTION);
         assertThat(session.getContractId()).isEqualTo("001");
         verify(clientRepo, never()).findById(any());
